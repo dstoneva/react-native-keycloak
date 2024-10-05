@@ -16,6 +16,7 @@ import InAppBrowser from 'react-native-inappbrowser-reborn';
 import LocalStorage from './storage';
 import type { RNKeycloakInitOptions } from './types';
 import { fetchJSON } from './utils';
+import { Linking } from 'react-native';
 
 class RNAdapter implements KeycloakAdapter {
   private readonly client: Readonly<KeycloakInstance>;
@@ -69,27 +70,41 @@ class RNAdapter implements KeycloakAdapter {
   }
 
   async logout(options?: KeycloakLogoutOptions): Promise<void> {
-    const logoutUrl = this.client.createLogoutUrl(options);
-
-    if (await InAppBrowser.isAvailable()) {
-      // See for more details https://github.com/proyecto26/react-native-inappbrowser#authentication-flow-using-deep-linking
-      const res = await InAppBrowser.openAuth(
-        logoutUrl,
-        this.client.redirectUri!,
-        this.initOptions.inAppBrowserOptions
-      );
-
-      if (res.type === 'success') {
-        return this.client.clearToken();
+    try {
+      if (!this.client || !this.client.idToken) {
+        throw new Error('Keycloak instance or ID token is missing.');
       }
-
-      throw new Error('Logout flow failed');
-    } else {
-      throw new Error('InAppBrowser not available');
-      // TODO: maybe!
-      //   Linking.openURL(logoutUrl);
+  
+      let logoutUrl = this.client.createLogoutUrl(options);
+      if (!logoutUrl) {
+        throw new Error('Unable to create logout URL.');
+      }
+  
+      logoutUrl = logoutUrl.replace('redirect_uri', 'post_logout_redirect_uri') + `&id_token_hint=${this.client.idToken}`;
+  
+      if (await InAppBrowser.isAvailable()) {
+        const result = await InAppBrowser.openAuth(logoutUrl, options?.redirectUri || this.client.redirectUri!);
+  
+        if (result.type === 'success') {
+          this.client.clearToken();
+        } else if (result.type === 'cancel' || result.type === 'dismiss') {
+          throw new Error('User has closed the browser');
+        } else {
+          throw new Error('Logout process failed in InAppBrowser.');
+        }
+      } else {
+        await Linking.openURL(logoutUrl);
+        this.client.clearToken();
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new Error(`Logout process failed: ${error.message}`);
+      } else {
+        throw new Error('An unknown error occurred during logout.');
+      }
     }
   }
+  
 
   async register(options?: KeycloakRegisterOptions) {
     const registerUrl = this.client.createRegisterUrl(options);
